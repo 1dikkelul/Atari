@@ -47,7 +47,7 @@ def main():
     # -------------------------------------------
 
     # 3. Resume training for a longer stretch
-    extra_steps = 1_000_000  # Bumped this up so you give the AI a real chance to learn!
+    extra_steps = 5_000_000  # Bumped this up so you give the AI a real chance to learn!
     print(f"Resuming training for an additional {extra_steps} timesteps...")
     
     start_time = time.time()
