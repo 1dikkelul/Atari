@@ -17,9 +17,17 @@ def main():
     env = make_atari_env("ALE/Pong-v5", n_envs=8, seed=42, env_kwargs={"render_mode": None}, vec_env_cls=SubprocVecEnv)
     env = VecFrameStack(env, n_stack=4)
 
-# 2. LOAD the existing saved model instead of making a new one
-    print("Loading existing model weights...")
-    model = PPO.load("ppo_pong_model", env=env, device=device)
+    # 2. LOAD the existing saved model and OVERRIDE parameters
+    print("Loading existing model weights with updated training dimensions...")
+    
+    # We explicitly inject our new, larger step and batch sizes right here
+    model = PPO.load(
+        "ppo_pong_model", 
+        env=env, 
+        device=device,
+        n_steps=2048,     # <--- Changed from 128
+        batch_size=512    # <--- Increased to keep optimization stable
+    )
 
     # --- THE BREAKOUT INJECTION ---
     # Force the learning rate back to its default starting speed
@@ -29,7 +37,7 @@ def main():
     # This prevents the entropy from staying locked down at -0.105
     model.ent_coef = 0.01          
 
-# --- THE APPEND-MODE LOG SPLITTER ENGINE ---
+    # --- THE APPEND-MODE LOG SPLITTER ENGINE ---
     import sys
     from stable_baselines3.common.logger import Logger, HumanOutputFormat
 
@@ -47,13 +55,18 @@ def main():
     # -------------------------------------------
 
     # 3. Resume training for a longer stretch
-    extra_steps = 5_000_000  # Bumped this up so you give the AI a real chance to learn!
+    extra_steps = 10_000_000  # Bumped this up so you give the AI a real chance to learn!
     print(f"Resuming training for an additional {extra_steps} timesteps...")
     
     start_time = time.time()
     try:
-        # reset_num_timesteps=False keeps your global step counter rolling continuously
-        model.learn(total_timesteps=extra_steps, reset_num_timesteps=False)
+        # ADDED: log_interval=100 stops it from writing a massive table every 16k steps.
+        # It will now wait 100 updates before printing a status report.
+        model.learn(
+            total_timesteps=extra_steps, 
+            reset_num_timesteps=False,
+            log_interval=10  # <--- CONTROL LOGGING FREQUENCY HERE
+        )
         print("Additional training complete!")
     except KeyboardInterrupt:
         print("\nTraining paused by user.")
