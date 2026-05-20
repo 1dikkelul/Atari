@@ -31,11 +31,11 @@ def main():
 
     # --- THE BREAKOUT INJECTION ---
     # Force the learning rate back to its default starting speed
-    model.learning_rate = 0.00025  
+    model.learning_rate = 0.00005    # Start with 0.00025 but then move it to 0.00005 for more final learning
     
     # Force it to value exploration again (default is usually 0.0)
     # This prevents the entropy from staying locked down at -0.105
-    model.ent_coef = 0.01          
+    model.ent_coef = 0.0          #Started with 0.01 to force it to explore, but closer to endgame leaving it back to 0.0
 
     # --- THE APPEND-MODE LOG SPLITTER ENGINE ---
     import sys
@@ -65,7 +65,7 @@ def main():
         model.learn(
             total_timesteps=extra_steps, 
             reset_num_timesteps=False,
-            log_interval=10  # <--- CONTROL LOGGING FREQUENCY HERE
+            log_interval=1  # <--- CONTROL LOGGING FREQUENCY HERE
         )
         print("Additional training complete!")
     except KeyboardInterrupt:
