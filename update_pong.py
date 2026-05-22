@@ -5,39 +5,68 @@ import ale_py  # Crucial for Gymnasium 1.0+ to register Atari ROMs
 import gymnasium as gym
 from stable_baselines3 import PPO
 from stable_baselines3.common.env_util import make_atari_env
-from stable_baselines3.common.vec_env import SubprocVecEnv, VecFrameStack
-from stable_baselines3.common.logger import configure  # Essential for file logging
+from stable_baselines3.common.vec_env import SubprocVecEnv, VecFrameStack, VecTransposeImage
+from stable_baselines3.common.callbacks import EvalCallback, StopTrainingOnRewardThreshold, BaseCallback
+
+# --- LEARNING RATE DECAY FUNCTION ---
+def linear_schedule(initial_value: float):
+    def func(progress_remaining: float) -> float:
+        return progress_remaining * initial_value
+    return func
+
+# --- LIVE WEEKEND TIMEOUT CALLBACK ---
+class WeekendTimeoutCallback(BaseCallback):
+    """
+    Stops training automatically if the elapsed wall-clock time 
+    exceeds a pre-allocated max duration.
+    """
+    def __init__(self, max_hours: float, verbose=1):
+        super(WeekendTimeoutCallback, self).__init__(verbose)
+        self.max_seconds = max_hours * 3600
+        self.start_time = None
+
+    def _on_training_start(self) -> None:
+        self.start_time = time.time()
+
+    def _on_step(self) -> bool:
+        elapsed = time.time() - self.start_time
+        if elapsed > self.max_seconds:
+            if self.verbose > 0:
+                print(f"\n[TIMEOUT] Weekend timer limit reached ({elapsed/3600:.2f} hours). Stopping training loop safely...")
+            return False  # Returning False completely breaks the PPO execution loop cleanly
+        return True
 
 def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device.upper()}")
 
-    # 1. Re-create the identical environment setup
-    print("Setting up environments...")
+    print("Setting up training environments...")
     env = make_atari_env("ALE/Pong-v5", n_envs=8, seed=42, env_kwargs={"render_mode": None}, vec_env_cls=SubprocVecEnv)
     env = VecFrameStack(env, n_stack=4)
 
-    # 2. LOAD the existing saved model and OVERRIDE parameters
-    print("Loading existing model weights with updated training dimensions...")
+    print("Setting up evaluation environments...")
+    eval_env = make_atari_env("ALE/Pong-v5", n_envs=4, seed=100, env_kwargs={"render_mode": None}, vec_env_cls=SubprocVecEnv)
+    eval_env = VecFrameStack(eval_env, n_stack=4)
+    eval_env = VecTransposeImage(eval_env)
+
+    # --- UPDATED TO WORK ON VERSION 3 CHECKPOINTS ---
+    model_name = "ppo_pong_model_v3"
+    print(f"Loading existing model weights from {model_name}.zip...")
     
-    # We explicitly inject our new, larger step and batch sizes right here
     model = PPO.load(
-        "ppo_pong_model", 
+        model_name, 
         env=env, 
         device=device,
-        n_steps=2048,     # <--- Changed from 128
-        batch_size=512    # <--- Increased to keep optimization stable
+        n_steps=128,      
+        batch_size=256    
     )
 
-    # --- THE BREAKOUT INJECTION ---
-    # Force the learning rate back to its default starting speed
-    model.learning_rate = 0.00005    # Start with 0.00025 but then move it to 0.00005 for more final learning
-    
-    # Force it to value exploration again (default is usually 0.0)
-    # This prevents the entropy from staying locked down at -0.105
-    model.ent_coef = 0.0          #Started with 0.01 to force it to explore, but closer to endgame leaving it back to 0.0
+    # --- BREAKOUT INJECTION PARAMETERS ---
+    model.clip_range = lambda progress_remaining: 0.2
+    model.ent_coef = 0.01
+    model.learning_rate = linear_schedule(2.5e-4)
 
-    # --- THE APPEND-MODE LOG SPLITTER ENGINE ---
+    # --- LOG ENGINE SETUP ---
     import sys
     from stable_baselines3.common.logger import Logger, HumanOutputFormat
 
@@ -45,31 +74,43 @@ def main():
     os.makedirs(log_dir, exist_ok=True)
     log_file_path = os.path.join(log_dir, "log.txt")
 
-    # 1. Manually build the outputs. We open the file handler in 'a' (append) mode.
     stdout_format = HumanOutputFormat(sys.stdout)
     file_format = HumanOutputFormat(open(log_file_path, "a", encoding="utf-8"))
-
-    # 2. Bind them into a custom SB3 Logger instance and inject it into the model
     sb3_logger = Logger(folder=log_dir, output_formats=[stdout_format, file_format])
     model.set_logger(sb3_logger)
-    # -------------------------------------------
 
-    # 3. Resume training for a longer stretch
-    extra_steps = 10_000_000  # Bumped this up so you give the AI a real chance to learn!
-    print(f"Resuming training for an additional {extra_steps} timesteps...")
+    # --- CALLBACK COUPLING ---
+    callback_on_best = StopTrainingOnRewardThreshold(reward_threshold=20.0, verbose=1)
+    eval_callback = EvalCallback(
+        eval_env, 
+        callback_on_new_best=callback_on_best, 
+        eval_freq=max(2500, 20000 // 8), 
+        log_path=log_dir, 
+        best_model_save_path="./best_model/",
+        deterministic=True, 
+        verbose=1
+    )
+
+    # Set to 6.0 Hours max runtime limit
+    timeout_callback = WeekendTimeoutCallback(max_hours=6.0, verbose=1)
+    
+    # Bundle both callbacks together into a single execution chain
+    callbacks = [eval_callback, timeout_callback]
+
+    extra_steps = 15_000_000  
+    print(f"Resuming training for up to {extra_steps} timesteps with a 6.0 hour time ceiling...")
     
     start_time = time.time()
     try:
-        # ADDED: log_interval=100 stops it from writing a massive table every 16k steps.
-        # It will now wait 100 updates before printing a status report.
         model.learn(
             total_timesteps=extra_steps, 
-            reset_num_timesteps=False,
-            log_interval=1  # <--- CONTROL LOGGING FREQUENCY HERE
+            reset_num_timesteps=False,   
+            callback=callbacks,
+            log_interval=1
         )
-        print("Additional training complete!")
+        print("\nTraining session ended successfully!")
     except KeyboardInterrupt:
-        print("\nTraining paused by user.")
+        print("\nTraining paused by user via KeyboardInterrupt.")
     finally:
         end_time = time.time()
         elapsed_time = end_time - start_time
@@ -77,9 +118,9 @@ def main():
         print(f"Real-time elapsed: {elapsed_time:.2f} seconds ({elapsed_time / 60:.2f} minutes)")
         print(f"--------------------------------\n")
 
-    # 4. Overwrite model
-    model.save("ppo_pong_model")
-    print("Updated model saved as ppo_pong_model.zip")
+    # Overwrites your v3 file safely
+    model.save(model_name)
+    print(f"Updated model saved cleanly back to {model_name}.zip")
 
 if __name__ == "__main__":
     main()
