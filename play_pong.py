@@ -109,10 +109,10 @@ def main():
 
     # Load Model Weights
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    if not os.path.exists("ppo_pong_model.zip"):
-        print("❌ Model weights file 'ppo_pong_model.zip' not found.")
+    if not os.path.exists("ppo_pong_model_v1.zip"):
+        print("❌ Model weights file 'ppo_pong_model_v1.zip' not found.")
         return
-    model = PPO.load("ppo_pong_model.zip", device=device)
+    model = PPO.load("ppo_pong_model_v1.zip", device=device)
 
     game = GameState()
     

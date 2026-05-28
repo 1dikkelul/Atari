@@ -10,15 +10,16 @@ def main():
     print("Launching Full-Resolution Atari Pong window...")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    # Correct Order: Create raw game -> Wrap with AtariWrapper -> Vectorize with DummyVecEnv
-    raw_env_fn = lambda: AtariWrapper(gym.make("ALE/Pong-v5", render_mode="human"), screen_size=84)
+    # FIX: Switch to NoFrameskip-v4 to eliminate the double frame-skip bottleneck!
+    raw_env_fn = lambda: AtariWrapper(gym.make("PongNoFrameskip-v4", render_mode="human"), screen_size=84)
     env = DummyVecEnv([raw_env_fn])
     
-    # Stack 4 frames so the model can perceive ball velocity
+    # Stack 4 frames so the model can perceive ball velocity accurately
     env = VecFrameStack(env, n_stack=4)
 
     print("Loading your trained model...")
-    model = PPO.load("ppo_pong_model", env=env, device=device)
+    # Point directly to your master weight archive name
+    model = PPO.load("ppo_pong_model_v1", env=env, device=device)
 
     print("Starting match! Enjoy the show.")
     obs = env.reset()
@@ -26,7 +27,7 @@ def main():
     
     try:
         while not done:
-            # The model reads the hidden (4, 84, 84) grayscale stack
+            # The model reads the clean (4, 84, 84) grayscale stack matching its training dimension
             action, _states = model.predict(obs, deterministic=True)
             
             # The environment steps forward, updating your full-color window natively
