@@ -70,7 +70,7 @@ def main():
     # =========================================================================
     # CONFIGURATION & HIERARCHICAL PATH CLEANUP
     # =========================================================================
-    VERSION_TAG = "v5_final"
+    VERSION_TAG = "v6_temp"
     
     # Everything is anchored inside a single master folder path
     MASTER_RUNS_DIR = "./training_runs"
