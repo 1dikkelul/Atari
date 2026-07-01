@@ -1,180 +1,305 @@
 import os
-import numpy as np
+import re
+import sys
+import time
 import torch
-import pygame
+import numpy as np
+from gymnasium import spaces
+from pettingzoo.atari import pong_v3
+import supersuit as ss
+from agilerl.utils.utils import create_population
 from stable_baselines3 import PPO
 
-# --- CONFIGURATION ---
-WIDTH, HEIGHT = 600, 400
-PADDLE_WIDTH, PADDLE_HEIGHT = 12, 60
-BALL_SIZE = 12
-FPS = 60
+# --- EXACT PATH CONFIGURATIONS ---
+EVO_DIR = "./training_runs/evolutionary_league"
+SINGLE_AGENT_PATH = "./training_runs/single_agent/ppo_pong_model.zip"
+PLAYBACK_DELAY_SEC = 0.04
 
-# Colors
-WHITE = (255, 255, 255)
-BLACK = (0, 0, 0)
-GRAY = (100, 100, 100)
 
-class GameState:
-    def __init__(self):
-        self.reset()
+class ChannelFirstParallelWrapper:
+    def __init__(self, env):
+        self.env = env
+        self.possible_agents = env.possible_agents
+
+    @property
+    def agents(self):
+        return self.env.agents
+
+    def _transpose_obs(self, observations):
+        return {
+            agent: np.transpose(obs, (2, 0, 1))
+            for agent, obs in observations.items()
+        }
+
+    def observation_space(self, agent):
+        space = self.env.observation_space(agent)
+        if len(space.shape) != 3:
+            return space
+
+        channels = space.shape[2]
+        height = space.shape[0]
+        width = space.shape[1]
+        return spaces.Box(
+            low=space.low.min(),
+            high=space.high.max(),
+            shape=(channels, height, width),
+            dtype=space.dtype,
+        )
+
+    def action_space(self, agent):
+        return self.env.action_space(agent)
+
+    def reset(self, *args, **kwargs):
+        observations, infos = self.env.reset(*args, **kwargs)
+        return self._transpose_obs(observations), infos
+
+    def step(self, actions):
+        observations, rewards, terminations, truncations, infos = self.env.step(actions)
+        return self._transpose_obs(observations), rewards, terminations, truncations, infos
+
+    def close(self):
+        return self.env.close()
+
+    def __getattr__(self, name):
+        return getattr(self.env, name)
+
+
+def _get_latest_frame(obs):
+    arr = np.array(obs)
+    if arr.ndim == 3 and arr.shape[0] >= 1:
+        return arr[-1]
+    return arr
+
+
+def _estimate_ball_y(frame):
+    h, w = frame.shape
+    center = frame[:, w // 4 : (3 * w) // 4]
+    ys, _ = np.where(center > 0)
+    return int(np.median(ys)) if ys.size > 0 else h // 2
+
+
+def _estimate_paddle_y(frame, side):
+    h, w = frame.shape
+    strip = frame[:, :12] if side == "left" else frame[:, w - 12 :]
+    ys, _ = np.where(strip > 0)
+    return int(np.median(ys)) if ys.size > 0 else h // 2
+
+
+def heuristic_pong_action(obs, side):
+    frame = _get_latest_frame(obs)
+    ball_y = _estimate_ball_y(frame)
+    paddle_y = _estimate_paddle_y(frame, side)
+
+    if ball_y < paddle_y - 1:
+        return 3
+    if ball_y > paddle_y + 1:
+        return 2
+    return 0
+
+
+def load_sb3_model_compat(model_path, observation_space=None, action_space=None):
+    # Some older SB3 checkpoints were pickled with numpy._core.* module paths.
+    if "numpy._core" not in sys.modules:
+        sys.modules["numpy._core"] = np.core
+    if "numpy._core.numeric" not in sys.modules:
+        sys.modules["numpy._core.numeric"] = np.core.numeric
+
+    # Ignore stale training/runtime state in old checkpoints.
+    custom_objects = {
+        "_last_obs": None,
+        "_last_episode_starts": None,
+        "_last_original_obs": None,
+        "ep_info_buffer": None,
+        "ep_success_buffer": None,
+    }
+    if observation_space is not None:
+        custom_objects["observation_space"] = observation_space
+    if action_space is not None:
+        custom_objects["action_space"] = action_space
+
+    return PPO.load(model_path, custom_objects=custom_objects)
+
+def get_available_generations():
+    """Scans evolutionary_league and returns sorted pairs of (gen_num, path)."""
+    if not os.path.exists(EVO_DIR):
+        return []
+    
+    files = os.listdir(EVO_DIR)
+    gen_models = []
+    for f in files:
+        if f.startswith("pong_champ_gen_") and f.endswith(".pt"):
+            match = re.search(r"pong_champ_gen_(\d+)\.pt", f)
+            if match:
+                gen_num = int(match.group(1))
+                gen_models.append((gen_num, os.path.join(EVO_DIR, f)))
+                
+    return sorted(gen_models, key=lambda x: x[0])
+
+def select_model_interactive():
+    """Interactive menu to choose which AgileRL generation to load."""
+    models = get_available_generations()
+    if not models:
+        print(f"❌ No evolutionary models found in: {EVO_DIR}")
+        return None
         
-    def reset(self):
-        self.player_y = HEIGHT // 2 - PADDLE_HEIGHT // 2
-        self.nn_y = HEIGHT // 2 - PADDLE_HEIGHT // 2
-        self.ball_x = WIDTH // 2
-        self.ball_y = HEIGHT // 2
-        self.ball_dx = 5 if np.random.rand() > 0.5 else -5
-        self.ball_dy = np.random.uniform(-3, 3)
-        self.player_score = 0
-        self.nn_score = 0
-
-    def update(self, player_action, nn_action):
-        # 1. Move Player (Left Paddle) -> 2: UP, 3: DOWN
-        if player_action == 2:
-            self.player_y = max(0, self.player_y - 6)
-        elif player_action == 3:
-            self.player_y = min(HEIGHT - PADDLE_HEIGHT, self.player_y + 6)
-
-        # 2. Move NN (Right Paddle) -> 2: UP, 3: DOWN
-        if nn_action == 2:
-            self.nn_y = max(0, self.nn_y - 6)
-        elif nn_action == 3:
-            self.nn_y = min(HEIGHT - PADDLE_HEIGHT, self.nn_y + 6)
-
-        # 3. Move Ball
-        self.ball_x += self.ball_dx
-        self.ball_y += self.ball_dy
-
-        # Wall bounces (Top/Bottom)
-        if self.ball_y <= 0 or self.ball_y >= HEIGHT - BALL_SIZE:
-            self.ball_dy *= -1
-
-        # Paddle Collisions (Left / Player)
-        if (self.ball_x <= PADDLE_WIDTH + 10 and 
-            self.player_y <= self.ball_y <= self.player_y + PADDLE_HEIGHT):
-            self.ball_dx *= -1.1  # Speed up slightly on hits
-            relative_intersect_y = (self.player_y + (PADDLE_HEIGHT / 2)) - self.ball_y
-            self.ball_dy = -(relative_intersect_y / (PADDLE_HEIGHT / 2)) * 5
-
-        # Paddle Collisions (Right / NN)
-        if (self.ball_x >= WIDTH - PADDLE_WIDTH - 10 - BALL_SIZE and 
-            self.nn_y <= self.ball_y <= self.nn_y + PADDLE_HEIGHT):
-            self.ball_dx *= -1.1
-            relative_intersect_y = (self.nn_y + (PADDLE_HEIGHT / 2)) - self.ball_y
-            self.ball_dy = -(relative_intersect_y / (PADDLE_HEIGHT / 2)) * 5
-
-        # Scoring
-        if self.ball_x < 0:
-            self.nn_score += 1
-            self.reset_ball()
-        elif self.ball_x > WIDTH:
-            self.player_score += 1
-            self.reset_ball()
-
-    def reset_ball(self):
-        self.ball_x = WIDTH // 2
-        self.ball_y = HEIGHT // 2
-        self.ball_dx = 5 if np.random.rand() > 0.5 else -5
-        self.ball_dy = np.random.uniform(-3, 3)
-
-    def generate_atari_frame(self):
-        """Generates a simplified 84x84 grayscale representation for the NN."""
-        frame = np.zeros((84, 84), dtype=np.uint8)
-        scale_x = 84 / WIDTH
-        scale_y = 84 / HEIGHT
-
-        # Draw left paddle (Value 142 mimicking Atari surface values)
-        py1, py2 = int(self.player_y * scale_y), int((self.player_y + PADDLE_HEIGHT) * scale_y)
-        px1, px2 = int(10 * scale_x), int((10 + PADDLE_WIDTH) * scale_x)
-        frame[py1:py2, px1:px2] = 142
-
-        # Draw right paddle
-        ny1, ny2 = int(self.nn_y * scale_y), int((self.nn_y + PADDLE_HEIGHT) * scale_y)
-        nx1, nx2 = int((WIDTH - 10 - PADDLE_WIDTH) * scale_x), int((WIDTH - 10) * scale_x)
-        frame[ny1:ny2, nx1:nx2] = 142
-
-        # Draw ball
-        bx, by = int(self.ball_x * scale_x), int(self.ball_y * scale_y)
-        frame[max(0, by-1):min(84, by+2), max(0, bx-1):min(84, bx+2)] = 255
+    print("\n--- 🧬 CHOOSE YOUR AGILERL LEAGUE CHAMPION ---")
+    for gen, path in models:
+        print(f" [{gen}] Generation {gen} Checkpoint ({os.path.basename(path)})")
         
-        return frame
+    while True:
+        try:
+            choice = int(input("\nEnter Generation Number to deploy (e.g., 100): "))
+            selected = [m for m in models if m[0] == choice]
+            if selected:
+                return selected[0][1]
+            print("Invalid generation number. Pick from the list above.")
+        except ValueError:
+            print("Please enter a valid integer.")
 
 def main():
-    pygame.init()
-    screen = pygame.display.set_mode((WIDTH, HEIGHT))
-    pygame.display.set_caption("Human (Left keys) vs. Trained NN (Right)")
-    clock = pygame.time.Clock()
-    font = pygame.font.SysFont(None, 36)
-
-    # Load Model Weights
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    if not os.path.exists("ppo_pong_model_v1.zip"):
-        print("❌ Model weights file 'ppo_pong_model_v1.zip' not found.")
-        return
-    model = PPO.load("ppo_pong_model_v1.zip", device=device)
-
-    game = GameState()
+    print("========================================================")
+    print("---          ATARI PONG TRI-REALM ARENA              ---")
+    print("========================================================")
     
-    # Initialize a 4-frame buffer history for the VecFrameStack imitation
-    initial_frame = game.generate_atari_frame()
-    frame_stack = np.stack([initial_frame] * 4, axis=0)
+    # 1. Choose the AgileRL League Model (Left Paddle)
+    evo_model_path = select_model_interactive()
+    if not evo_model_path:
+        return
+        
+    # 2. Choose the Opponent Style (Right Paddle)
+    print("\n--- ⚔️ SELECT OPPONENT STYLE FOR RIGHT PADDLE ---")
+    print(" [1] Heuristic Atari-Style AI Opponent")
+    print(" [2] Manual Keyboard Controls (Play Yourself via W/S or Arrow Keys)")
+    print(" [3] Stable-Baselines3 Single-Agent Model (ppo_pong_model.zip)")
+    
+    opponent_mode = input("\nEnter choice (1, 2, or 3): ").strip()
+    
+    # Validate SB3 model existence if Mode 3 selected
+    sb3_model = None
+    sb3_requested = opponent_mode == "3"
+    if sb3_requested and not os.path.exists(SINGLE_AGENT_PATH):
+        print(f"❌ Cannot find Stable-Baselines3 model at: {SINGLE_AGENT_PATH}")
+        return
 
+    # 3. Spin up native PettingZoo with Visual Rendering enabled
+    print("\nInitializing native Atari ROM runtime environment...")
+    env = pong_v3.parallel_env(obs_type='rgb_image', render_mode='human', max_cycles=100000)
+    
+    # Identical SuperSuit transformations matching your training pipeline
+    env = ss.max_observation_v0(env, 2)
+    env = ss.frame_skip_v0(env, 4)
+    env = ss.color_reduction_v0(env, mode='full')
+    env = ss.resize_v1(env, 84, 84)
+    env = ss.frame_stack_v2(env, 4)
+    
+    # Match training pipeline exactly by transposing HWC -> CHW, rather than reshaping memory layout.
+    env = ChannelFirstParallelWrapper(env)
+    
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    agents = env.possible_agents  # ['first_0', 'second_0']
+    # In this env variant, second_0 renders as the left/orange paddle.
+    model_agent = "second_0"
+    opponent_agent = "first_0"
+
+    if sb3_requested:
+        print(f"📥 Loading Stable-Baselines3 model into memory...")
+        sb3_model = load_sb3_model_compat(
+            SINGLE_AGENT_PATH,
+            observation_space=env.observation_space(opponent_agent),
+            action_space=env.action_space(opponent_agent),
+        )
+    
+    # 4. Instantiate a dummy AgileRL container to hold the state dictionary weights
+    NET_CONFIG = {
+        "encoder_config": {
+            "channel_size": [32, 64, 64],
+            "kernel_size": [8, 4, 3],
+            "stride_size": [4, 2, 1]
+        }
+    }
+    INIT_HP = {
+        "ALGO": "PPO", "BATCH_SIZE": 256, "LR": 2.5e-4, "GAMMA": 0.99, "GAE_LAMBDA": 0.95,
+        "SHARE_ENCODERS": False, "ACTION_MASKED": False
+    }
+    
+    dummy_pop = create_population(
+        algo=INIT_HP["ALGO"],
+        observation_space=env.observation_space(agents[0]),
+        action_space=env.action_space(agents[0]),
+        net_config=NET_CONFIG,
+        INIT_HP=INIT_HP,
+        population_size=1,
+        device=device
+    )
+    league_brain = dummy_pop[0]
+    
+    print(f"Injecting AgileRL structural weights from: {os.path.basename(evo_model_path)}")
+    league_brain.load_checkpoint(evo_model_path)
+    
+    print("\n🚀 Arena Active! Click on the game window. Press 'ESC' to exit cleanly.")
+    
+    states, infos = env.reset()
     running = True
-    while running:
-        clock.tick(FPS)
-        
-        # 1. Handle Window Closing Events
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
+    try:
+        while env.agents and running:
+            actions = {}
 
-        # 2. Process Human Keyboard Input
-        keys = pygame.key.get_pressed()
-        player_action = 0  # Default: 0 = Stay still
-        
-        if keys[pygame.K_UP]:
-            player_action = 2   # Atari mapping for UP
-        elif keys[pygame.K_DOWN]:
-            player_action = 3   # Atari mapping for DOWN
+            # --- LEFT (ORANGE): AgileRL League Brain ---
+            if model_agent in env.agents:
+                state_arr = np.array(states[model_agent])
+                state_tensor = torch.from_numpy(state_arr).unsqueeze(0).to(device)
 
-        # Escape route via 'Escape' key
-        if keys[pygame.K_ESCAPE]:
-            running = False
+                # Match AgileRL PPO API used in training code.
+                action, _, _, _ = league_brain.get_action(state_tensor)
+                actions[model_agent] = int(np.array(action).squeeze())
 
-        # 3. Get AI Prediction
-        nn_input = np.expand_dims(frame_stack, axis=0)
-        nn_action, _ = model.predict(nn_input, deterministic=True)
-        nn_action = nn_action[0]
+            # --- RIGHT (GREEN): Selected Opponent ---
+            if opponent_agent in env.agents:
+                if opponent_mode == "1":
+                    actions[opponent_agent] = heuristic_pong_action(states[opponent_agent], side="right")
 
-        # 4. Update game math
-        game.update(player_action, nn_action)
+                elif opponent_mode == "2":
+                    import pygame
 
-        # 5. Generate the latest observation frame and cycle the stack
-        new_frame = game.generate_atari_frame()
-        frame_stack = np.roll(frame_stack, shift=-1, axis=0)
-        frame_stack[-1] = new_frame
+                    pygame.event.pump()
+                    keys = pygame.key.get_pressed()
+                    if keys[pygame.K_UP] or keys[pygame.K_w]:
+                        actions[opponent_agent] = 2
+                    elif keys[pygame.K_DOWN] or keys[pygame.K_s]:
+                        actions[opponent_agent] = 3
+                    else:
+                        actions[opponent_agent] = 0
 
-        # 6. Render Screen
-        screen.fill(BLACK)
-        
-        # Center divider line
-        for y in range(0, HEIGHT, 20):
-            if (y // 20) % 2 == 0:
-                pygame.draw.rect(screen, GRAY, (WIDTH // 2 - 2, y, 4, 10))
+                    if keys[pygame.K_ESCAPE]:
+                        running = False
 
-        # Draw Paddles and Ball
-        pygame.draw.rect(screen, WHITE, (10, game.player_y, PADDLE_WIDTH, PADDLE_HEIGHT))
-        pygame.draw.rect(screen, WHITE, (WIDTH - 10 - PADDLE_WIDTH, game.nn_y, PADDLE_WIDTH, PADDLE_HEIGHT))
-        pygame.draw.rect(screen, WHITE, (game.ball_x, game.ball_y, BALL_SIZE, BALL_SIZE))
+                elif opponent_mode == "3":
+                    sb3_input = np.expand_dims(np.array(states[opponent_agent]), axis=0)
+                    sb3_action, _ = sb3_model.predict(sb3_input, deterministic=True)
+                    actions[opponent_agent] = int(sb3_action[0])
 
-        # Draw Scoreboard
-        score_text = font.render(f"{game.player_score}   {game.nn_score}", True, WHITE)
-        screen.blit(score_text, (WIDTH // 2 - score_text.get_width() // 2, 20))
+            # Only poll pygame events when manual keyboard controls are active.
+            if opponent_mode == "2":
+                import pygame
 
-        pygame.display.flip()
+                for event in pygame.event.get():
+                    if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                        running = False
 
-    pygame.quit()
+            # Step the underlying emulation engine forward
+            next_states, rewards, terminations, truncations, infos = env.step(actions)
+            states = next_states
+
+            # Keep playback watchable for humans instead of running at emulator max speed.
+            time.sleep(PLAYBACK_DELAY_SEC)
+
+    except KeyboardInterrupt:
+        print("\nArena context closed out.")
+    finally:
+        env.close()
+        print("\n========================================================")
+        print("Arena Exhibition Completed Cleanly.")
+        print("========================================================\n")
 
 if __name__ == "__main__":
     main()
