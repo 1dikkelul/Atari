@@ -1,9 +1,8 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
     <meta charset="UTF-8">
-    <title>AI Pong Exhibition Arena</title>
+    <title>ALE WASM Atari Pong Arena</title>
     <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
     <style>
         body {
@@ -20,7 +19,7 @@
         h1 {
             text-shadow: 0 0 10px rgba(0, 255, 204, 0.6);
             margin-bottom: 5px;
-            font-size: 28px;
+            font-size: 26px;
         }
 
         .subtitle {
@@ -31,74 +30,13 @@
             font-weight: bold;
         }
 
-        /* Dashboard Container layout grid */
-        .arena-container {
-            display: flex;
-            gap: 20px;
+        .casual-controls {
+            width: 1000px;
+            max-width: 100%;
+            margin: 0 0 14px 0;
             background: #0b0b16;
             border: 2px solid #00ffcc;
             box-shadow: 0 0 20px rgba(0, 255, 204, 0.2);
-            padding: 15px;
-            border-radius: 4px;
-        }
-
-        canvas {
-            border: 1px solid rgba(0, 255, 204, 0.3);
-            background: #0a0a12;
-        }
-
-        /* Telemetry panel adjustments */
-        .telemetry-panel {
-            width: 280px;
-            border-left: 1px dashed rgba(0, 255, 204, 0.3);
-            padding-left: 20px;
-            display: flex;
-            flex-direction: column;
-        }
-
-        .status-indicator {
-            background: #111122;
-            border: 1px solid #ff007f;
-            color: #ff007f;
-            padding: 10px;
-            font-size: 12px;
-            text-align: center;
-            text-transform: uppercase;
-            box-shadow: 0 0 10px rgba(255, 0, 127, 0.1);
-            font-weight: bold;
-        }
-
-        /* New scrolling cyberpunk terminal console log */
-        .system-log {
-            background: #020205;
-            border: 1px solid rgba(0, 255, 204, 0.2);
-            color: #a0a0b0;
-            font-size: 11px;
-            padding: 10px;
-            height: 140px;
-            overflow-y: auto;
-            white-space: pre-wrap;
-            margin-top: 15px;
-            border-radius: 2px;
-            box-shadow: inset 0 0 10px rgba(0, 0, 0, 0.8);
-        }
-
-        .controls-tip {
-            margin-top: auto;
-            font-size: 12px;
-            color: rgba(0, 255, 204, 0.6);
-            line-height: 1.5;
-            border-top: 1px solid rgba(0, 255, 204, 0.2);
-            padding-top: 10px;
-        }
-
-        .casual-controls {
-            width: 1120px;
-            max-width: 100%;
-            margin: 18px 0 10px 0;
-            background: #0b0b16;
-            border: 2px solid #00ffcc;
-            box-shadow: 0 0 18px rgba(0, 255, 204, 0.2);
             padding: 12px;
             display: flex;
             flex-wrap: wrap;
@@ -127,9 +65,71 @@
             font-weight: bold;
         }
 
+        .arena-container {
+            display: flex;
+            gap: 16px;
+            background: #0b0b16;
+            border: 2px solid #00ffcc;
+            box-shadow: 0 0 20px rgba(0, 255, 204, 0.2);
+            padding: 15px;
+            border-radius: 4px;
+        }
+
+        canvas {
+            border: 1px solid rgba(0, 255, 204, 0.3);
+            background: #0a0a12;
+            width: 640px;
+            height: 420px;
+            image-rendering: pixelated;
+        }
+
+        .telemetry-panel {
+            width: 280px;
+            border-left: 1px dashed rgba(0, 255, 204, 0.3);
+            padding-left: 20px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .status-indicator {
+            background: #111122;
+            border: 1px solid #ff007f;
+            color: #ff007f;
+            padding: 10px;
+            font-size: 12px;
+            text-align: center;
+            text-transform: uppercase;
+            box-shadow: 0 0 10px rgba(255, 0, 127, 0.1);
+            font-weight: bold;
+        }
+
+        .system-log {
+            background: #020205;
+            border: 1px solid rgba(0, 255, 204, 0.2);
+            color: #a0a0b0;
+            font-size: 11px;
+            padding: 10px;
+            height: 140px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            margin-top: 15px;
+            border-radius: 2px;
+            box-shadow: inset 0 0 10px rgba(0, 0, 0, 0.8);
+        }
+
+        .controls-tip {
+            margin-top: auto;
+            font-size: 12px;
+            color: rgba(0, 255, 204, 0.6);
+            line-height: 1.5;
+            border-top: 1px solid rgba(0, 255, 204, 0.2);
+            padding-top: 10px;
+        }
+
         .leaderboard-wrap {
-            width: 1120px;
+            width: 1000px;
             max-width: 100%;
+            margin-top: 14px;
             background: #0b0b16;
             border: 2px solid rgba(255, 0, 127, 0.55);
             box-shadow: 0 0 16px rgba(255, 0, 127, 0.18);
@@ -160,48 +160,40 @@
         }
     </style>
 </head>
-
 <body>
-
-    <h1>🧬 ATARI PONG TRI-REALM ARENA</h1>
-    <div class="subtitle">ONNX LOCAL CLIENT ARCHITECTURE RUNTIME</div>
+    <h1>Atari Pong Casual Arena</h1>
+    <div class="subtitle">ALE WASM ROM Runtime + Optional ONNX Opponent Policy</div>
 
     <div class="casual-controls">
         <label for="playerNameInput">Player</label>
         <input id="playerNameInput" type="text" value="Player1" maxlength="24">
 
-        <label for="opponentSelect">Opponent</label>
+        <label for="opponentSelect">Mode</label>
         <select id="opponentSelect"></select>
 
-        <button id="startMatchBtn">Start Match (First to 5)</button>
+        <button id="startMatchBtn">Start Match</button>
+        <button id="stopMatchBtn">Stop Match</button>
         <button id="clearLeaderboardBtn">Clear Leaderboard</button>
     </div>
 
     <div class="arena-container">
-        <canvas id="pongCanvas"></canvas>
+        <canvas id="gameCanvas" width="640" height="420"></canvas>
 
         <div class="telemetry-panel">
-            <div class="status-indicator" id="engineStatus">
-                AI Engine: STANDBY
-            </div>
+            <div class="status-indicator" id="engineStatus">Engine: STANDBY</div>
 
             <h3>METRICS</h3>
-            <div id="metricsContent" style="font-size: 13px; color: rgba(255,255,255,0.7); min-height: 130px;">
-                [.. Waiting for AI hook ..]
+            <div id="metricsContent" style="font-size: 13px; color: rgba(255,255,255,0.7); min-height: 120px;">
+                [.. Waiting for ROM load ..]
             </div>
 
-            <div style="font-size: 11px; color: #ff007f; font-weight: bold; margin-top: 10px;">AI VISION (84×84):</div>
-            <canvas id="aiVisionDebug" width="168" height="168"
-                style="margin-top:4px; border:1px solid rgba(255,0,127,0.4); image-rendering:pixelated;"></canvas>
-
-            <div style="font-size: 11px; color: #ff007f; font-weight: bold; margin-top: 10px;">CORE MATRIX TELEMETRY:
-            </div>
+            <div style="font-size: 11px; color: #ff007f; font-weight: bold; margin-top: 10px;">SYSTEM LOG</div>
             <div class="system-log" id="systemLog">Initializing system diagnostics...</div>
 
             <div class="controls-tip">
-                <strong>MANUAL CONTROLS:</strong><br>
-                • W / S Keys<br>
-                • Up / Down Arrows
+                <strong>CONTROLS:</strong><br>
+                W/S or Arrow Up/Down for Human mode.<br>
+                SB3 mode runs policy vs Atari AI.
             </div>
         </div>
     </div>
@@ -216,70 +208,13 @@
                     <th>Wins</th>
                     <th>Losses</th>
                     <th>Win Rate</th>
-                    <th>Last Score</th>
+                    <th>Last Reward</th>
                 </tr>
             </thead>
             <tbody id="leaderboardBody"></tbody>
         </table>
     </div>
 
-    <script src="./js/game.js"></script>
-    <script>
-        window.addEventListener('DOMContentLoaded', async () => {
-            console.log("Initializing Arena Canvas Context...");
-
-            window.uiLog = function (msg, isError = false) {
-                const logBox = document.getElementById('systemLog');
-                if (logBox) {
-                    const color = isError ? '#ff3366' : '#a0a0b0';
-                    logBox.innerHTML += `<div style="color: ${color};">[${new Date().toLocaleTimeString()}] ${msg}</div>`;
-                    logBox.scrollTop = logBox.scrollHeight;
-                }
-            };
-
-            window.uiLog("Arena wrapper booted.");
-
-            try {
-                // This will now explicitly catch if PongArena is missing or broken
-                const arena = new PongArena('pongCanvas');
-
-                const opponentSelect = document.getElementById('opponentSelect');
-                const playerNameInput = document.getElementById('playerNameInput');
-                const startMatchBtn = document.getElementById('startMatchBtn');
-                const clearLeaderboardBtn = document.getElementById('clearLeaderboardBtn');
-
-                for (const opp of arena.getOpponents()) {
-                    const option = document.createElement('option');
-                    option.value = opp.id;
-                    option.textContent = opp.label;
-                    opponentSelect.appendChild(option);
-                }
-
-                opponentSelect.value = arena.selectedOpponent.id;
-
-                startMatchBtn.addEventListener('click', async () => {
-                    arena.setPlayerName(playerNameInput.value);
-                    await arena.setOpponent(opponentSelect.value);
-                    await arena.startMatch();
-                });
-
-                clearLeaderboardBtn.addEventListener('click', () => {
-                    arena.resetLeaderboard();
-                    window.uiLog('Leaderboard reset for this browser profile.');
-                });
-
-                window.uiLog("Attempting async ONNX engine bootstrap...");
-                await arena.loadModel(arena.selectedOpponent.modelPath);
-                arena.renderLeaderboard();
-
-                window.uiLog("Starting hardware clock animation loop.");
-                arena.loop();
-            } catch (bootError) {
-                console.error("Boot failure:", bootError);
-                window.uiLog(`❌ BOOT CRASH: ${bootError.message}`, true);
-            }
-        });
-    </script>
+    <script type="module" src="./js/ale_casual.js"></script>
 </body>
-
 </html>

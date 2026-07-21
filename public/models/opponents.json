@@ -1,0 +1,23 @@
+[
+  {
+    "id": "human",
+    "label": "Human (you) vs Atari AI",
+    "kind": "human",
+    "enabled": true
+  },
+  {
+    "id": "sb3_v1",
+    "label": "SB3 Pong v1 vs Atari AI",
+    "kind": "onnx",
+    "modelPath": "./models/sb3_pong_actor.onnx",
+    "enabled": true
+  },
+  {
+    "id": "pz_gen100",
+    "label": "PettingZoo Gen100 (coming soon)",
+    "kind": "onnx",
+    "modelPath": "./models/pong_champ_gen_100.onnx",
+    "enabled": false,
+    "notes": "Enable after PettingZoo ONNX action/preprocessing mapping is finalized"
+  }
+]
