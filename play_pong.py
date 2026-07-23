@@ -11,7 +11,7 @@ from agilerl.utils.utils import create_population
 from stable_baselines3 import PPO
 
 # --- EXACT PATH CONFIGURATIONS ---
-EVO_DIR = "./training_runs/evolutionary_league"
+EVO_DIR = "./training_runs/agile_marl_v1/evolved_brains"
 SINGLE_AGENT_PATH = "./training_runs/single_agent/ppo_pong_model.zip"
 PLAYBACK_DELAY_SEC = 0.04
 
@@ -173,6 +173,16 @@ def main():
     print(" [3] Stable-Baselines3 Single-Agent Model (ppo_pong_model.zip)")
     
     opponent_mode = input("\nEnter choice (1, 2, or 3): ").strip()
+    pygame_mod = None
+
+    if opponent_mode == "2":
+        import pygame
+
+        pygame.init()
+        # Pygame keyboard APIs require an initialized video/event subsystem.
+        pygame.display.set_mode((1, 1))
+        pygame.display.set_caption("Pong Keyboard Input")
+        pygame_mod = pygame
     
     # Validate SB3 model existence if Mode 3 selected
     sb3_model = None
@@ -259,18 +269,16 @@ def main():
                     actions[opponent_agent] = heuristic_pong_action(states[opponent_agent], side="right")
 
                 elif opponent_mode == "2":
-                    import pygame
-
-                    pygame.event.pump()
-                    keys = pygame.key.get_pressed()
-                    if keys[pygame.K_UP] or keys[pygame.K_w]:
+                    pygame_mod.event.pump()
+                    keys = pygame_mod.key.get_pressed()
+                    if keys[pygame_mod.K_UP] or keys[pygame_mod.K_w]:
                         actions[opponent_agent] = 2
-                    elif keys[pygame.K_DOWN] or keys[pygame.K_s]:
+                    elif keys[pygame_mod.K_DOWN] or keys[pygame_mod.K_s]:
                         actions[opponent_agent] = 3
                     else:
                         actions[opponent_agent] = 0
 
-                    if keys[pygame.K_ESCAPE]:
+                    if keys[pygame_mod.K_ESCAPE]:
                         running = False
 
                 elif opponent_mode == "3":
@@ -280,10 +288,8 @@ def main():
 
             # Only poll pygame events when manual keyboard controls are active.
             if opponent_mode == "2":
-                import pygame
-
-                for event in pygame.event.get():
-                    if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                for event in pygame_mod.event.get():
+                    if event.type == pygame_mod.KEYDOWN and event.key == pygame_mod.K_ESCAPE:
                         running = False
 
             # Step the underlying emulation engine forward
@@ -297,6 +303,8 @@ def main():
         print("\nArena context closed out.")
     finally:
         env.close()
+        if pygame_mod is not None:
+            pygame_mod.quit()
         print("\n========================================================")
         print("Arena Exhibition Completed Cleanly.")
         print("========================================================\n")

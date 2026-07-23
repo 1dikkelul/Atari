@@ -60,6 +60,17 @@
             font-size: 13px;
         }
 
+        #inferenceTempRange {
+            width: 120px;
+        }
+
+        #inferenceTempValue {
+            min-width: 42px;
+            color: rgba(255, 255, 255, 0.9);
+            font-size: 12px;
+            display: inline-block;
+        }
+
         .casual-controls button {
             cursor: pointer;
             font-weight: bold;
@@ -136,6 +147,35 @@
             padding: 12px;
         }
 
+        .trend-wrap {
+            width: 1000px;
+            max-width: 100%;
+            margin-top: 14px;
+            background: #0b0b16;
+            border: 2px solid rgba(0, 255, 204, 0.55);
+            box-shadow: 0 0 16px rgba(0, 255, 204, 0.18);
+            padding: 12px;
+        }
+
+        .trend-wrap h3 {
+            margin: 0 0 8px 0;
+            color: #77ffe7;
+        }
+
+        #actionTrendCanvas {
+            width: 100%;
+            height: 190px;
+            border: 1px solid rgba(0, 255, 204, 0.22);
+            background: #020205;
+        }
+
+        #actionSnapshotCanvas {
+            width: 100%;
+            height: 190px;
+            border: 1px solid rgba(0, 255, 204, 0.22);
+            background: #020205;
+        }
+
         .leaderboard-wrap h3 {
             margin: 0 0 8px 0;
             color: #ff6aa7;
@@ -171,6 +211,16 @@
         <label for="opponentSelect">Mode</label>
         <select id="opponentSelect"></select>
 
+        <label for="inferenceModeSelect">ONNX Inference</label>
+        <select id="inferenceModeSelect">
+            <option value="argmax">Argmax</option>
+            <option value="sample">Sample</option>
+        </select>
+
+        <label for="inferenceTempRange">Temp</label>
+        <input id="inferenceTempRange" type="range" min="0.2" max="2.0" step="0.1" value="1.0">
+        <span id="inferenceTempValue">1.0</span>
+
         <button id="startMatchBtn">Start Match</button>
         <button id="stopMatchBtn">Stop Match</button>
         <button id="clearLeaderboardBtn">Clear Leaderboard</button>
@@ -193,9 +243,19 @@
             <div class="controls-tip">
                 <strong>CONTROLS:</strong><br>
                 W/S or Arrow Up/Down for Human mode.<br>
-                SB3 mode runs policy vs Atari AI.
+                Any discovered ONNX mode runs policy vs Atari AI.
             </div>
         </div>
+    </div>
+
+    <div class="trend-wrap">
+        <h3>Dominant Choice Rate (Per-Second)</h3>
+        <canvas id="actionTrendCanvas" width="1000" height="190"></canvas>
+    </div>
+
+    <div class="trend-wrap">
+        <h3>Periodic 1-Second Action Snapshot (Every 30s)</h3>
+        <canvas id="actionSnapshotCanvas" width="1000" height="190"></canvas>
     </div>
 
     <div class="leaderboard-wrap">

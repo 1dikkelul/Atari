@@ -3,11 +3,19 @@ const ALE_WASM_CDN = 'https://cdn.jsdelivr.net/npm/@farama/ale-wasm/+esm';
 
 const DEFAULT_OPPONENTS = [
   { id: 'human', label: 'Human (you) vs Atari AI', kind: 'human' },
-  { id: 'sb3_v1', label: 'SB3 Pong v1 vs Atari AI', kind: 'onnx', modelPath: './models/sb3_pong_actor.onnx' },
+  {
+    id: 'sb3_v1',
+    label: 'SB3 Pong v1 vs Atari AI',
+    kind: 'onnx',
+    modelPath: './models/sb3_pong_actor.onnx',
+    inferenceMode: 'sample',
+    temperature: 1.0,
+  },
   // Placeholder for future PettingZoo/AgileRL export path.
   { id: 'pz_gen100', label: 'PettingZoo Gen100 (coming soon)', kind: 'onnx', modelPath: './models/pong_champ_gen_100.onnx', enabled: false },
 ];
 const OPPONENTS_MANIFEST_URL = './models/opponents.json';
+const MODELS_DIR_URL = './models/';
 
 const LEADERBOARD_KEY = 'ale_wasm_casual_leaderboard_v1';
 const DEFAULT_ROM_URL = './roms/pong.bin';
@@ -28,6 +36,32 @@ class ALECasualApp {
 
     this.rawCanvas = document.createElement('canvas');
     this.rawCtx = this.rawCanvas.getContext('2d');
+
+    this.actionTrendCanvas = document.getElementById('actionTrendCanvas');
+    this.actionTrendCtx = this.actionTrendCanvas ? this.actionTrendCanvas.getContext('2d') : null;
+    this.actionSnapshotCanvas = document.getElementById('actionSnapshotCanvas');
+    this.actionSnapshotCtx = this.actionSnapshotCanvas ? this.actionSnapshotCanvas.getContext('2d') : null;
+    this.actionTrend = [];
+    this.trendIntervalMs = 1000;
+    this.trendWindowSec = 30;
+    this.trendMaxPoints = 240;
+    this.trendCycleStartSec = 0;
+    this.trendBinStartMs = 0;
+    this.trendBinCounts = { dominant: 0, total: 0 };
+    this.lastChosenModelIndex = null;
+    this.currentActionIntent = 'noop';
+
+    this.snapshotPeriodMs = 30000;
+    this.snapshotDurationMs = 1000;
+    this.snapshotBinMs = 50;
+    this.snapshotNextCaptureAtMs = 0;
+    this.snapshotCaptureStartMs = null;
+    this.snapshotCaptureEvents = [];
+    this.snapshotSeries = [];
+    this.snapshotTickSeries = [];
+    this.lastSnapshotCapturedAtMs = 0;
+    this.lastDecisionNonDominant = false;
+    this.lastDecisionIntent = null;
 
     this.frameStack = [];
     this.rawFramePair = [];
@@ -116,6 +150,7 @@ class ALECasualApp {
     status.style.color = '#00ff66';
 
     await this.loadOpponentsManifest();
+    await this.discoverOnnxOpponents();
     this.renderLeaderboard();
     this.populateOpponentSelect();
     this.wireControls();
@@ -173,6 +208,123 @@ class ALECasualApp {
     }
   }
 
+  async discoverOnnxOpponents() {
+    try {
+      const response = await fetch(MODELS_DIR_URL, { cache: 'no-store' });
+      if (!response.ok) {
+        this.uiLog(`Model directory scan skipped (HTTP ${response.status}).`);
+        return;
+      }
+
+      const html = await response.text();
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(html, 'text/html');
+      const anchors = Array.from(doc.querySelectorAll('a[href]'));
+
+      const modelFiles = anchors
+        .map((a) => a.getAttribute('href') || '')
+        .map((href) => {
+          try {
+            const u = new URL(href, response.url);
+            return decodeURIComponent(u.pathname.split('/').pop() || '');
+          } catch {
+            return '';
+          }
+        })
+        .filter((name) => /\.onnx$/i.test(name));
+
+      const uniqueModelFiles = Array.from(new Set(modelFiles)).sort((a, b) => a.localeCompare(b));
+      if (uniqueModelFiles.length === 0) {
+        this.uiLog('Model directory scan found no .onnx files.');
+        return;
+      }
+
+      const discovered = [];
+      for (const fileName of uniqueModelFiles) {
+        const modelPath = `./models/${fileName}`;
+        const alreadyPresent = this.opponents.some((opp) => opp.kind === 'onnx' && opp.modelPath === modelPath);
+        if (alreadyPresent) continue;
+        discovered.push(this.buildOnnxOpponentFromFileName(fileName));
+      }
+
+      if (discovered.length > 0) {
+        this.opponents.push(...discovered);
+      }
+
+      this.uiLog(`Discovered ${uniqueModelFiles.length} ONNX model file(s) in ./models.`);
+    } catch (err) {
+      this.uiLog(`Model directory scan failed: ${err.message}`, true);
+    }
+  }
+
+  buildOnnxOpponentFromFileName(fileName) {
+    const stem = fileName.replace(/\.onnx$/i, '');
+    const id = `auto_${stem.replace(/[^a-zA-Z0-9]+/g, '_').toLowerCase()}`;
+    const pretty = stem
+      .replace(/[_-]+/g, ' ')
+      .replace(/\b\w/g, (c) => c.toUpperCase())
+      .trim();
+
+    return {
+      id,
+      label: `${pretty} vs Atari AI`,
+      kind: 'onnx',
+      modelPath: `./models/${fileName}`,
+      inferenceMode: 'argmax',
+      temperature: 1.0,
+    };
+  }
+
+  normalizeOpponentInferenceConfig(opponent) {
+    if (!opponent || opponent.kind !== 'onnx') return;
+    if (opponent.inferenceMode !== 'sample' && opponent.inferenceMode !== 'argmax') {
+      opponent.inferenceMode = 'argmax';
+    }
+    const temp = Number(opponent.temperature);
+    opponent.temperature = Number.isFinite(temp) ? Math.min(2.0, Math.max(0.2, temp)) : 1.0;
+  }
+
+  refreshInferenceControls() {
+    const modeSelect = document.getElementById('inferenceModeSelect');
+    const tempRange = document.getElementById('inferenceTempRange');
+    const tempValue = document.getElementById('inferenceTempValue');
+    if (!modeSelect || !tempRange || !tempValue) return;
+
+    const onnxSelected = this.selectedOpponent && this.selectedOpponent.kind === 'onnx';
+    modeSelect.disabled = !onnxSelected;
+    tempRange.disabled = !onnxSelected;
+
+    if (!onnxSelected) {
+      modeSelect.value = 'argmax';
+      tempRange.value = '1.0';
+      tempValue.textContent = 'n/a';
+      return;
+    }
+
+    this.normalizeOpponentInferenceConfig(this.selectedOpponent);
+    const mode = this.selectedOpponent.inferenceMode || 'argmax';
+    const temp = Number(this.selectedOpponent.temperature ?? 1.0).toFixed(1);
+    modeSelect.value = mode;
+    tempRange.value = temp;
+    tempValue.textContent = temp;
+  }
+
+  applyInferenceControlsToSelectedOpponent() {
+    if (!this.selectedOpponent || this.selectedOpponent.kind !== 'onnx') return;
+
+    const modeSelect = document.getElementById('inferenceModeSelect');
+    const tempRange = document.getElementById('inferenceTempRange');
+    const tempValue = document.getElementById('inferenceTempValue');
+    if (!modeSelect || !tempRange || !tempValue) return;
+
+    this.selectedOpponent.inferenceMode = modeSelect.value === 'sample' ? 'sample' : 'argmax';
+    const t = Number(tempRange.value);
+    this.selectedOpponent.temperature = Number.isFinite(t) ? Math.min(2.0, Math.max(0.2, t)) : 1.0;
+    tempValue.textContent = this.selectedOpponent.temperature.toFixed(1);
+
+    this.updateStatusLine();
+  }
+
   async loadLocalAleBundle() {
     if (typeof globalThis.createALEModule === 'function') {
       return globalThis.createALEModule;
@@ -224,14 +376,26 @@ class ALECasualApp {
     const clearBtn = document.getElementById('clearLeaderboardBtn');
     const opponentSelect = document.getElementById('opponentSelect');
     const playerInput = document.getElementById('playerNameInput');
+    const inferenceModeSelect = document.getElementById('inferenceModeSelect');
+    const inferenceTempRange = document.getElementById('inferenceTempRange');
 
     opponentSelect.addEventListener('change', async () => {
       const selected = this.opponents.find((o) => o.id === opponentSelect.value) || this.opponents[0];
       this.selectedOpponent = selected;
+      this.normalizeOpponentInferenceConfig(this.selectedOpponent);
+      this.refreshInferenceControls();
       if (selected.kind === 'onnx') {
         await this.ensureModelLoaded(selected.modelPath);
       }
       this.updateStatusLine();
+    });
+
+    inferenceModeSelect.addEventListener('change', () => {
+      this.applyInferenceControlsToSelectedOpponent();
+    });
+
+    inferenceTempRange.addEventListener('input', () => {
+      this.applyInferenceControlsToSelectedOpponent();
     });
 
     playerInput.addEventListener('change', () => {
@@ -253,6 +417,8 @@ class ALECasualApp {
       this.renderLeaderboard();
       this.uiLog('Leaderboard cleared for this browser profile.');
     });
+
+    this.refreshInferenceControls();
   }
 
   async loadRomFromFile(file) {
@@ -360,6 +526,42 @@ class ALECasualApp {
     }
 
     return this.pickLegal([index]);
+  }
+
+  softmax(logits, temperature = 1.0) {
+    const t = Math.max(1e-6, Number(temperature) || 1.0);
+    const maxLogit = Math.max(...logits);
+    const exps = logits.map((v) => Math.exp((v - maxLogit) / t));
+    const sumExp = exps.reduce((a, b) => a + b, 0);
+    if (!Number.isFinite(sumExp) || sumExp <= 0) {
+      const uniform = 1 / Math.max(1, logits.length);
+      return logits.map(() => uniform);
+    }
+    return exps.map((v) => v / sumExp);
+  }
+
+  sampleFromProbs(probs) {
+    let r = Math.random();
+    for (let i = 0; i < probs.length; i++) {
+      r -= probs[i];
+      if (r <= 0) return i;
+    }
+    return Math.max(0, probs.length - 1);
+  }
+
+  chooseActionIndexFromLogits(logits, opponent) {
+    const mode = (opponent && opponent.inferenceMode) || 'argmax';
+    if (mode === 'sample') {
+      const temperature = opponent && opponent.temperature != null ? opponent.temperature : 1.0;
+      const probs = this.softmax(logits, temperature);
+      return this.sampleFromProbs(probs);
+    }
+
+    let argmax = 0;
+    for (let i = 1; i < logits.length; i++) {
+      if (logits[i] > logits[argmax]) argmax = i;
+    }
+    return argmax;
   }
 
   resolveControlActions() {
@@ -532,21 +734,387 @@ class ALECasualApp {
     const status = document.getElementById('engineStatus');
     status.textContent = `Engine: Loading model ${path}...`;
 
-    const response = await fetch(path);
-    if (!response.ok) {
-      throw new Error(`Could not fetch model: HTTP ${response.status}`);
+    try {
+      // Fast path for single-file ONNX models.
+      this.aiSession = await ort.InferenceSession.create(path);
+    } catch (err) {
+      const msg = String(err?.message || err || '');
+      const needsExternalData = /external data|MountedFiles|Deserialize tensor/i.test(msg);
+      if (!needsExternalData) {
+        throw err;
+      }
+
+      this.uiLog('Model appears to use external tensor data; loading sidecar .onnx.data file...');
+      this.aiSession = await this.loadModelWithExternalData(path);
     }
 
-    const modelBytes = await response.arrayBuffer();
-    this.aiSession = await ort.InferenceSession.create(modelBytes);
     this.modelPath = path;
     this.uiLog(`Model ready: ${path}`);
   }
 
+  async loadModelWithExternalData(path) {
+    const modelResp = await fetch(path, { cache: 'no-store' });
+    if (!modelResp.ok) {
+      throw new Error(`Could not fetch model: HTTP ${modelResp.status}`);
+    }
+    const modelBytes = new Uint8Array(await modelResp.arrayBuffer());
+
+    const sidecarPath = `${path}.data`;
+    const sidecarResp = await fetch(sidecarPath, { cache: 'no-store' });
+    if (!sidecarResp.ok) {
+      throw new Error(`Could not fetch external data: ${sidecarPath} (HTTP ${sidecarResp.status})`);
+    }
+    const sidecarBytes = new Uint8Array(await sidecarResp.arrayBuffer());
+
+    const modelFile = path.split('/').pop() || 'model.onnx';
+    const externalFile = `${modelFile}.data`;
+
+    // Some exports store the location token with literal quotes in the ONNX graph,
+    // so we provide both variants to maximize compatibility.
+    return await ort.InferenceSession.create(modelBytes, {
+      externalData: [
+        { path: externalFile, data: sidecarBytes },
+        { path: `"${externalFile}"`, data: sidecarBytes },
+      ],
+    });
+  }
+
   updateStatusLine(extra = '') {
     const status = document.getElementById('engineStatus');
-    const base = `Engine: ALE WASM | Opponent: ${this.selectedOpponent.label}`;
+    let base = `Engine: ALE WASM | Opponent: ${this.selectedOpponent.label}`;
+    if (this.selectedOpponent && this.selectedOpponent.kind === 'onnx') {
+      const mode = this.selectedOpponent.inferenceMode || 'argmax';
+      const temp = Number(this.selectedOpponent.temperature ?? 1.0).toFixed(1);
+      base += ` | Inference: ${mode} (T=${temp})`;
+    }
     status.textContent = extra ? `${base} | ${extra}` : base;
+  }
+
+  resetActionTrend() {
+    this.actionTrend = [];
+    this.trendCycleStartSec = 0;
+    // Start first bin immediately so we don't show an empty 0-1s region.
+    this.trendBinStartMs = Date.now() - this.trendIntervalMs;
+    this.trendBinCounts = { dominant: 0, total: 0 };
+    this.lastChosenModelIndex = null;
+
+    const now = Date.now();
+    this.snapshotNextCaptureAtMs = now;
+    this.snapshotCaptureStartMs = now;
+    this.snapshotCaptureEvents = [];
+    this.snapshotSeries = [];
+    this.snapshotTickSeries = [];
+    this.lastSnapshotCapturedAtMs = 0;
+    this.lastDecisionNonDominant = false;
+    this.lastDecisionIntent = null;
+  }
+
+  updatePeriodicSnapshot(intent, nonDominantTick) {
+    if (!this.running) return;
+
+    const now = Date.now();
+    if (!this.snapshotCaptureStartMs && now >= this.snapshotNextCaptureAtMs) {
+      this.snapshotCaptureStartMs = now;
+      this.snapshotCaptureEvents = [];
+    }
+
+    if (!this.snapshotCaptureStartMs) return;
+
+    const dt = now - this.snapshotCaptureStartMs;
+    if (dt <= this.snapshotDurationMs) {
+      this.snapshotCaptureEvents.push({ dt, intent, nonDominantTick: !!nonDominantTick });
+      return;
+    }
+
+    const binCount = Math.max(1, Math.floor(this.snapshotDurationMs / this.snapshotBinMs));
+    const bins = Array.from({ length: binCount }, () => ({ up: 0, down: 0, noop: 0, total: 0 }));
+
+    for (const ev of this.snapshotCaptureEvents) {
+      const idx = Math.min(binCount - 1, Math.max(0, Math.floor(ev.dt / this.snapshotBinMs)));
+      bins[idx].total += 1;
+      if (ev.intent === 'up') bins[idx].up += 1;
+      else if (ev.intent === 'down') bins[idx].down += 1;
+      else bins[idx].noop += 1;
+    }
+
+    this.snapshotSeries = bins.map((b, idx) => {
+      const t = (idx + 0.5) * (this.snapshotBinMs / 1000);
+      if (b.total === 0) return { t, upPct: 0, downPct: 0, noopPct: 0 };
+      return {
+        t,
+        upPct: (b.up / b.total) * 100,
+        downPct: (b.down / b.total) * 100,
+        noopPct: (b.noop / b.total) * 100,
+      };
+    });
+
+    this.snapshotTickSeries = this.snapshotCaptureEvents
+      .filter((ev) => ev.nonDominantTick)
+      .map((ev) => ({ t: Math.max(0, Math.min(1.0, ev.dt / 1000)), intent: ev.intent }));
+
+    this.lastSnapshotCapturedAtMs = now;
+    this.snapshotCaptureStartMs = null;
+    this.snapshotCaptureEvents = [];
+    this.snapshotNextCaptureAtMs = now + this.snapshotPeriodMs;
+  }
+
+  classifyActionIntent(actionId) {
+    const controls = this.controlActions || {};
+    const upCandidates = [controls.up, 2, 4, 10, 12].filter((v) => Number.isInteger(v));
+    const downCandidates = [controls.down, 3, 5, 11, 13].filter((v) => Number.isInteger(v));
+
+    if (upCandidates.includes(actionId)) return 'up';
+    if (downCandidates.includes(actionId)) return 'down';
+    return 'noop';
+  }
+
+  updateDominanceTrend(selectedIndex, dominantIndex) {
+    if (!this.running) return;
+
+    const now = Date.now();
+    if (!this.trendBinStartMs) this.trendBinStartMs = now;
+
+    this.trendBinCounts.total += 1;
+    if (selectedIndex === dominantIndex) this.trendBinCounts.dominant += 1;
+
+    if (now - this.trendBinStartMs < this.trendIntervalMs) {
+      return;
+    }
+
+    const total = this.trendBinCounts.total;
+    const dominantPct = total > 0 ? (this.trendBinCounts.dominant / total) * 100 : 100;
+    const elapsedSec = this.matchStart ? (now - this.matchStart) / 1000 : 0;
+
+    if (this.trendCycleStartSec === 0) {
+      this.trendCycleStartSec = elapsedSec;
+    }
+
+    if (elapsedSec - this.trendCycleStartSec >= this.trendWindowSec) {
+      this.actionTrend = [];
+      this.trendCycleStartSec = elapsedSec;
+    }
+
+    this.actionTrend.push({ t: elapsedSec, dominantPct });
+    if (this.actionTrend.length > this.trendMaxPoints) {
+      this.actionTrend.shift();
+    }
+
+    this.trendBinCounts = { dominant: 0, total: 0 };
+    this.trendBinStartMs = now;
+  }
+
+  renderActionTrend() {
+    if (!this.actionTrendCtx || !this.actionTrendCanvas) return;
+
+    const ctx = this.actionTrendCtx;
+    const canvas = this.actionTrendCanvas;
+    const w = canvas.width;
+    const h = canvas.height;
+    const padL = 42;
+    const padR = 14;
+    const padT = 12;
+    const padB = 28;
+    const plotW = w - padL - padR;
+    const plotH = h - padT - padB;
+
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = '#020205';
+    ctx.fillRect(0, 0, w, h);
+
+    ctx.strokeStyle = 'rgba(0,255,204,0.24)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(padL, padT);
+    ctx.lineTo(padL, h - padB);
+    ctx.lineTo(w - padR, h - padB);
+    ctx.stroke();
+
+    const yTicks = [0, 25, 50, 75, 100];
+    ctx.fillStyle = 'rgba(200, 255, 248, 0.75)';
+    ctx.font = '11px Courier New';
+    yTicks.forEach((pct) => {
+      const y = padT + plotH - (pct / 100) * plotH;
+      ctx.strokeStyle = 'rgba(0,255,204,0.12)';
+      ctx.beginPath();
+      ctx.moveTo(padL, y);
+      ctx.lineTo(w - padR, y);
+      ctx.stroke();
+      ctx.fillText(`${pct}%`, 4, y + 4);
+    });
+
+    const windowStart = this.trendCycleStartSec;
+    const windowEnd = windowStart + this.trendWindowSec;
+    const span = Math.max(1e-6, windowEnd - windowStart);
+    const xFor = (t) => padL + ((t - windowStart) / span) * plotW;
+    const yFor = (pct) => padT + plotH - (pct / 100) * plotH;
+
+    const xTicks = [0, 5, 10, 15, 20, 25, 30];
+    ctx.fillStyle = 'rgba(200, 255, 248, 0.7)';
+    xTicks.forEach((s) => {
+      const x = padL + (s / this.trendWindowSec) * plotW;
+      ctx.strokeStyle = 'rgba(0,255,204,0.10)';
+      ctx.beginPath();
+      ctx.moveTo(x, padT);
+      ctx.lineTo(x, h - padB);
+      ctx.stroke();
+      ctx.fillText(`${s}s`, x - 8, h - 8);
+    });
+
+    if (this.actionTrend.length >= 1) {
+      const visibleTrend = this.actionTrend.filter((p) => p.t >= windowStart && p.t <= windowEnd);
+
+      ctx.strokeStyle = '#ffcc44';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      visibleTrend.forEach((p, idx) => {
+        const x = xFor(p.t);
+        const y = yFor(p.dominantPct);
+        if (idx === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+
+      ctx.fillStyle = 'rgba(200, 255, 248, 0.75)';
+      ctx.fillText('Fixed 30s cycle (auto-reset)', w - 220, h - 8);
+
+      const lastPoint = visibleTrend[visibleTrend.length - 1];
+      if (lastPoint) {
+        const nonDominantPct = Math.max(0, 100 - lastPoint.dominantPct);
+        ctx.fillText(
+          `Dominant: ${lastPoint.dominantPct.toFixed(1)}% | Non-dominant: ${nonDominantPct.toFixed(1)}%`,
+          padL + 280,
+          12
+        );
+      }
+    }
+
+    ctx.fillStyle = '#ffcc44';
+    ctx.fillRect(padL + 8, 6, 10, 3);
+    ctx.fillStyle = 'rgba(200, 255, 248, 0.85)';
+    ctx.fillText('Dominant-choice % per second', padL + 22, 12);
+
+    ctx.fillStyle = 'rgba(200, 255, 248, 0.66)';
+    ctx.fillText('100% = always chose argmax, lower = more non-dominant picks', w - 430, 12);
+  }
+
+  renderActionSnapshot() {
+    if (!this.actionSnapshotCtx || !this.actionSnapshotCanvas) return;
+
+    const ctx = this.actionSnapshotCtx;
+    const canvas = this.actionSnapshotCanvas;
+    const w = canvas.width;
+    const h = canvas.height;
+    const padL = 42;
+    const padR = 14;
+    const padT = 12;
+    const padB = 28;
+    const plotW = w - padL - padR;
+    const plotH = h - padT - padB;
+
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = '#020205';
+    ctx.fillRect(0, 0, w, h);
+
+    ctx.strokeStyle = 'rgba(0,255,204,0.24)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(padL, padT);
+    ctx.lineTo(padL, h - padB);
+    ctx.lineTo(w - padR, h - padB);
+    ctx.stroke();
+
+    const yTicks = [0, 25, 50, 75, 100];
+    ctx.fillStyle = 'rgba(200, 255, 248, 0.75)';
+    ctx.font = '11px Courier New';
+    yTicks.forEach((pct) => {
+      const y = padT + plotH - (pct / 100) * plotH;
+      ctx.strokeStyle = 'rgba(0,255,204,0.12)';
+      ctx.beginPath();
+      ctx.moveTo(padL, y);
+      ctx.lineTo(w - padR, y);
+      ctx.stroke();
+      ctx.fillText(`${pct}%`, 4, y + 4);
+    });
+
+    const xTicks = [0, 0.25, 0.5, 0.75, 1.0];
+    xTicks.forEach((s) => {
+      const x = padL + s * plotW;
+      ctx.strokeStyle = 'rgba(0,255,204,0.10)';
+      ctx.beginPath();
+      ctx.moveTo(x, padT);
+      ctx.lineTo(x, h - padB);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(200, 255, 248, 0.7)';
+      ctx.fillText(`${s.toFixed(2)}s`, x - 14, h - 8);
+    });
+
+    if (this.snapshotSeries.length > 0) {
+      const xFor = (t) => padL + (t / 1.0) * plotW;
+      const yFor = (pct) => padT + plotH - (pct / 100) * plotH;
+
+      const drawLine = (key, color) => {
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        this.snapshotSeries.forEach((p, idx) => {
+          const x = xFor(Math.min(1.0, p.t));
+          const y = yFor(p[key]);
+          if (idx === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+      };
+
+      drawLine('upPct', '#00ff88');
+      drawLine('downPct', '#ff5f9a');
+      drawLine('noopPct', '#8aa0b8');
+
+      for (const tick of this.snapshotTickSeries) {
+        const x = xFor(tick.t);
+        let color = '#8aa0b8';
+        if (tick.intent === 'up') color = '#00ff88';
+        if (tick.intent === 'down') color = '#ff5f9a';
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(x, h - padB + 2);
+        ctx.lineTo(x, h - padB + 10);
+        ctx.stroke();
+      }
+    }
+
+    ctx.fillStyle = '#00ff88';
+    ctx.fillRect(padL + 8, 6, 10, 3);
+    ctx.fillStyle = 'rgba(200, 255, 248, 0.85)';
+    ctx.fillText('UP %', padL + 22, 12);
+
+    ctx.fillStyle = '#ff5f9a';
+    ctx.fillRect(padL + 78, 6, 10, 3);
+    ctx.fillStyle = 'rgba(200, 255, 248, 0.85)';
+    ctx.fillText('DOWN %', padL + 92, 12);
+
+    ctx.fillStyle = '#8aa0b8';
+    ctx.fillRect(padL + 162, 6, 10, 3);
+    ctx.fillStyle = 'rgba(200, 255, 248, 0.85)';
+    ctx.fillText('NOOP %', padL + 176, 12);
+
+    ctx.fillStyle = 'rgba(200, 255, 248, 0.66)';
+    ctx.fillText('Bottom ticks: non-dominant sampled decisions', padL + 250, 12);
+
+    const now = Date.now();
+    let statusText = 'Waiting for first 1s capture...';
+    if (this.snapshotCaptureStartMs) {
+      const remaining = Math.max(0, this.snapshotDurationMs - (now - this.snapshotCaptureStartMs));
+      statusText = `Capturing now (${(remaining / 1000).toFixed(2)}s left)`;
+    } else if (this.lastSnapshotCapturedAtMs > 0) {
+      const until = Math.max(0, this.snapshotNextCaptureAtMs - now);
+      statusText = `Last capture complete | Next in ${(until / 1000).toFixed(1)}s`;
+    } else {
+      const untilFirst = Math.max(0, this.snapshotNextCaptureAtMs - now);
+      statusText = `First capture in ${(untilFirst / 1000).toFixed(1)}s`;
+    }
+    ctx.fillStyle = 'rgba(200, 255, 248, 0.66)';
+    ctx.fillText(statusText, w - 330, 12);
   }
 
   resetEpisodeState() {
@@ -557,6 +1125,7 @@ class ALECasualApp {
     this.frameCounter = 0;
     this.rewardSum = 0;
     this.matchStart = Date.now();
+    this.resetActionTrend();
   }
 
   async startMatch() {
@@ -693,14 +1262,29 @@ class ALECasualApp {
 
       const results = await this.aiSession.run({ input: new ort.Tensor('float32', input, [1, 4, 84, 84]) });
       const logits = results.output.data;
-      let argmax = 0;
+
+      let dominantIndex = 0;
       for (let i = 1; i < logits.length; i++) {
-        if (logits[i] > logits[argmax]) argmax = i;
+        if (logits[i] > logits[dominantIndex]) dominantIndex = i;
       }
 
-      this.currentAIAction = this.mapSb3IndexToAleAction(argmax);
+      const selectedIndex = this.chooseActionIndexFromLogits(logits, this.selectedOpponent);
+      this.lastChosenModelIndex = selectedIndex;
+
+      const selectedAleAction = this.mapSb3IndexToAleAction(selectedIndex);
+      const dominantAleAction = this.mapSb3IndexToAleAction(dominantIndex);
+      this.currentAIAction = selectedAleAction;
+
+      const selectedIntent = this.classifyActionIntent(selectedAleAction);
+      const dominantIntent = this.classifyActionIntent(dominantAleAction);
+      const mode = (this.selectedOpponent && this.selectedOpponent.inferenceMode) || 'argmax';
+      this.lastDecisionNonDominant = mode === 'sample' && selectedIntent !== dominantIntent;
+      this.lastDecisionIntent = selectedIntent;
+      this.updateDominanceTrend(selectedIndex, dominantIndex);
     } catch (err) {
       this.uiLog(`Inference error: ${err.message}`, true);
+      this.lastDecisionNonDominant = false;
+      this.lastDecisionIntent = null;
     } finally {
       this.inferenceBusy = false;
     }
@@ -723,7 +1307,9 @@ class ALECasualApp {
       `<strong>Reward Sum:</strong> ${this.rewardSum}<br>`,
       `<strong>Frame:</strong> ${this.frameCounter}<br>`,
       `<strong>Running:</strong> ${this.running ? 'Yes' : 'No'}<br>`,
-      `<strong>Action:</strong> ${humanAction}`,
+      `<strong>Model Index:</strong> ${this.lastChosenModelIndex == null ? 'n/a' : this.lastChosenModelIndex}<br>`,
+      `<strong>Action:</strong> ${humanAction}<br>`,
+      `<strong>Intent:</strong> ${this.currentActionIntent.toUpperCase()}`,
     ].join('');
   }
 
@@ -815,6 +1401,10 @@ class ALECasualApp {
       this.lastActionWasMove = action === controls.up || action === controls.down;
     }
     const reward = this.ale.act(action);
+    this.currentActionIntent = this.classifyActionIntent(action);
+    const isDecisionFrame = this.selectedOpponent.kind === 'onnx' && this.frameCounter % 4 === 0;
+    const snapshotIntent = isDecisionFrame && this.lastDecisionIntent ? this.lastDecisionIntent : this.currentActionIntent;
+    this.updatePeriodicSnapshot(snapshotIntent, isDecisionFrame && this.lastDecisionNonDominant);
     this.rewardSum += reward;
 
     const { width, height } = this.captureRawGrayscaleFrame();
@@ -855,6 +1445,9 @@ class ALECasualApp {
     if (this.romLoaded) {
       this.renderFrame();
     }
+
+    this.renderActionTrend();
+    this.renderActionSnapshot();
 
     requestAnimationFrame(() => this.loop());
   }

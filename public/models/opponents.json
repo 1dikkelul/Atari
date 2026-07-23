@@ -10,6 +10,24 @@
     "label": "SB3 Pong v1 vs Atari AI",
     "kind": "onnx",
     "modelPath": "./models/sb3_pong_actor.onnx",
+    "inferenceMode": "sample",
+    "temperature": 1.0,
+    "enabled": true
+  },
+  {
+    "id": "champ_gen70",
+    "label": "Pong Champ Gen 70 vs Atari AI",
+    "kind": "onnx",
+    "modelPath": "./models/pong_champ_gen_70.onnx",
+    "inferenceMode": "argmax",
+    "enabled": true
+  },
+  {
+    "id": "champ_gen30",
+    "label": "Pong Champ Gen 30 vs Atari AI",
+    "kind": "onnx",
+    "modelPath": "./models/pong_champ_gen_30.onnx",
+    "inferenceMode": "argmax",
     "enabled": true
   },
   {
